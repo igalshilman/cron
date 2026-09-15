@@ -1,4 +1,4 @@
-# lovable-sched-api
+# cron
 
 A per-project cron scheduler built as a [Restate](https://restate.dev) Virtual Object in TypeScript.
 
@@ -30,65 +30,62 @@ Key: the project id. It doubles as the scope key, so it must match `[a-zA-Z0-9_.
 | `delete` | exclusive                  | `{ id }`                | -            |
 | `get`    | shared                     | `{ id }`                | `Schedule`   |
 | `list`   | shared                     | -                       | `Schedule[]` |
-| `tick`   | exclusive, ingress-private | `{ id }`                | -            |
+| `wake`   | exclusive, ingress-private | -                       | -            |
 
 ### How a schedule runs
 
-1. `create` validates the cron expression and timezone, assigns a schedule id and stores the schedule under its own
-   state key, `schedule/<id>`. Each schedule has its own key, so create, delete and tick never contend on a shared blob
-   and `list` simply walks the key space.
-2. Arming queues two delayed one-way calls in Restate for the next occurrence:
-   - the **run**: a `genericSend` to `target.service` / `target.handler`, keyed by a new `runId`, with `scope` set to
-     the project id and the three headers above. Restate owns the timer, so the run fires on time even while this
-     service is down or redeploying.
-   - the **tick**: a self-call that moves the run into `lastRuns` (the last three), computes the next occurrence and
-     arms again.
-     Both invocation ids are stored on the schedule.
-3. `delete` cancels the pending tick, cancels the pending run only while it is still in the future, and clears the
-   state key. A run that is already due may be executing, and dropping a schedule never kills a workflow it started.
+1. `create` validates the cron expression and timezone, assigns a schedule id, computes the next occurrence and
+   stores the schedule under its own state key, `schedule/<id>`.
+2. Each project has a single timer: one delayed self-call to `wake`, armed for the earliest `nextRunAt` across
+   its schedules and recorded under the `timer` state key. `create` and `delete` re-arm it only when the earliest
+   moment changes. A project costs one object and one pending invocation, whatever its number of schedules.
+3. When `wake` fires it dispatches every due schedule with a `genericSend` to `target.service` / `target.handler`,
+   keyed by a new `runId`, with `scope` set to the project id and the three headers above. It records the run in
+   `lastRuns` (the last three), advances `nextRunAt`, and arms the timer again.
+4. `delete` clears the state key and re-arms. Runs already dispatched keep running; only future occurrences
+   disappear.
 
 Notes:
 
 - Occurrences come from [cron-parser](https://github.com/harrisiirak/cron-parser). Standard 5-field (minute) and
   6-field (leading seconds) expressions are accepted and evaluated in `timezone` (default `UTC`). Schedules run at
   most once per minute: a 6-field expression must have a single value in its seconds field.
-- The stored `cron` keeps the original `expression`, the canonical `normalized` form that ticks re-parse, the
+- The stored `cron` keeps the original `expression`, the canonical `normalized` form that wake-ups re-parse, the
   `timezone`, and the expanded `fields` (every matching value per field) so a UI or SQL over state can explain the
   schedule without a cron library.
-- A late tick computes the next occurrence from the later of the planned time and now, so missed slots are skipped
-  rather than fired in a burst.
-- A tick whose invocation id no longer matches `nextTickId`, or whose schedule was deleted, is a no-op.
+- Occurrences missed while a wake-up was late collapse into one run, and the schedule jumps to the next future
+  occurrence. The `x-scheduled-for` header carries the occurrence the run stands for.
+- A `wake` whose invocation id no longer matches the stored timer is a no-op.
 - Journal retention is zero for the bookkeeping handlers (`create`, `delete`, `get`, `list`) and six hours for
-  `tick`, so recent ticks stay inspectable in the UI without accumulating forever.
+  `wake`, so recent wake-ups stay inspectable in the UI without accumulating forever.
 
 ### Stored shape
 
 ```json
 {
-  "id": "cd4076c6-4dc1-45bf-bde7-b2628e1dafd9",
-  "target": { "service": "Sink", "handler": "run", "address": "wf://reports/daily" },
-  "payload": { "report": "daily" },
+  "id": "2a8658e7-bff3-4903-87de-7fb87c3d3b76",
+  "target": {
+    "service": "checkout",
+    "handler": "run",
+    "address": "https://example.com/api/checkout"
+  },
+  "payload": { "userId": "Francesco", "amount": 10 },
   "cron": {
-    "expression": "*/10 * * * * *",
-    "normalized": "*/10 * * * * *",
+    "expression": "*/15 * * * *",
+    "normalized": "0 */15 * * * *",
     "timezone": "UTC",
     "fields": {
-      "second": { "wildcard": false, "values": [0, 10, 20, 30, 40, 50] },
-      "minute": { "...": "..." }
+      "minute": { "wildcard": false, "values": [0, 15, 30, 45] },
+      "hour": { "...": "..." }
     }
   },
-  "createdAt": 1789479697910,
-  "nextRun": {
-    "runId": "886c1d28-...",
-    "invocationId": "inv_1eTOw4zOKh5E5fC6...",
-    "at": 1789479760000
-  },
-  "nextTickId": "inv_1eTOw4zOKh5E3nlJ...",
-  "lastRuns": [
-    { "runId": "56c8c9ac-...", "invocationId": "inv_1eTOw4zOKh5E2vV3...", "at": 1789479750000 }
-  ]
+  "createdAt": 1789483876123,
+  "nextRunAt": 1789484400000,
+  "lastRuns": [{ "runId": "e1afdf13-...", "invocationId": "inv_1ir2UWPz...", "at": 1789483500000 }]
 }
 ```
+
+The project's timer is a separate state entry: `"timer": { "invocationId": "inv_...", "wakeUpAt": 1789484400000 }`.
 
 ## Requirements
 
@@ -167,8 +164,8 @@ Notes:
 - The endpoint speaks HTTP/2 cleartext only. Use a TCP probe for liveness; HTTP/1.1 probes will not connect.
 
 ```sh
-docker build -t lovable-sched-api .
-docker run --rm -p 9080:9080 lovable-sched-api
+docker build -t cron .
+docker run --rm -p 9080:9080 cron
 ```
 
 The workflow in `.github/workflows/docker.yml` builds a `linux/amd64` and `linux/arm64` image with provenance and

@@ -22,6 +22,13 @@ export const Run = z.object({
 });
 export type Run = z.infer<typeof Run>;
 
+/** The project's single pending wake-up: a delayed self-call armed for the earliest upcoming run. */
+export const Timer = z.object({
+  invocationId: z.string(),
+  wakeUpAt: z.number(),
+});
+export type Timer = z.infer<typeof Timer>;
+
 export const CreateScheduleRequest = z.object({
   cron: z
     .string()
@@ -45,8 +52,8 @@ export const Schedule = z.object({
   payload: z.json().optional(),
   cron: CronSpec,
   createdAt: z.number(),
-  nextRun: Run,
-  nextTickId: z.string(),
+  /** Epoch milliseconds of the next occurrence. */
+  nextRunAt: z.number(),
   lastRuns: z.array(Run).max(3),
 });
 export type Schedule = z.infer<typeof Schedule>;
