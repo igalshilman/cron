@@ -12,8 +12,10 @@ target handler, typically the Restate Workflow that hosts a TanStack workflow ru
 
 ## Layout
 
-- `src/schemas.ts` - zod schemas for `Target`, `Run`, `CronSpec`, `Schedule` and the requests. Handler inputs and
-  outputs are validated with them through `restate.serde.schema`.
+- `src/cron-expression.ts` - all cron parsing and next-occurrence math, returning plain data (`CronSpec`, epoch
+  millis). The only file that touches cron-parser.
+- `src/schemas.ts` - zod schemas for `Target`, `Run`, `Schedule` and the requests. Handler inputs and outputs are
+  validated with them through `restate.serde.schema`.
 - `src/cron.ts` - the `cron` Virtual Object.
 - `src/app.ts` - the HTTP endpoint serving it on port 9080.
 
@@ -146,6 +148,28 @@ Notes:
    ```sql
    SELECT id, target, status, scope FROM sys_invocation WHERE scope = '<project id>';
    ```
+
+## Docker and CI
+
+`Dockerfile` produces a production image:
+
+- Multi-stage. Dependencies and `tsc` run in a `node:24-bookworm-slim` builder on the build host's platform; the
+  runtime stage is `gcr.io/distroless/nodejs24-debian12:nonroot` with only `dist/` and production dependencies.
+  No shell, no package manager, non-root (uid 65532). Both base images are pinned by digest and kept current by
+  Dependabot (`.github/dependabot.yml`).
+- `node` runs with `--enable-source-maps`, so stack traces point at the TypeScript sources.
+- `PORT` sets the listen port (default 9080); the SDK reads it directly.
+- The endpoint speaks HTTP/2 cleartext only. Use a TCP probe for liveness; HTTP/1.1 probes will not connect.
+
+```sh
+docker build -t lovable-sched-api .
+docker run --rm -p 9080:9080 lovable-sched-api
+```
+
+The workflow in `.github/workflows/docker.yml` builds a `linux/amd64` and `linux/arm64` image with provenance and
+SBOM attestations, and pushes it to `ghcr.io/<owner>/<repo>` on every push to `main` and on `v*` tags, using the
+workflow's own `GITHUB_TOKEN`. Tags: the branch name, `sha-<short sha>`, the version and `major.minor` for release
+tags, and `latest` for `main`.
 
 ## Other scripts
 

@@ -1,12 +1,11 @@
 import * as restate from "@restatedev/restate-sdk";
-import { CronExpressionParser } from "cron-parser";
 import { z } from "zod";
+import { type CronSpec, nextOccurrence, parseCron } from "./cron-expression.js";
 import {
   CreateScheduleRequest,
   Schedule,
   ScheduleRef,
   TARGET_ADDRESS_HEADER,
-  type CronSpec,
   type Target,
 } from "./schemas.js";
 
@@ -40,7 +39,7 @@ export const cron = restate.object({
         const id = ctx.rand.uuidv4();
         const now = await ctx.date.now();
         const spec = parseCron(req.cron, req.timezone);
-        const armed = await arm(ctx, id, req.target, req.payload, nextOccurrence(spec, now), now);
+        const armed = await arm(ctx, id, req.target, req.payload, dueAfter(spec, now), now);
 
         const schedule: Schedule = {
           id,
@@ -118,7 +117,7 @@ export const cron = restate.object({
         // Restate dispatches the run due at `nextRun.at` on its own timer. Record it and arm the following occurrence,
         // counted from the later of the planned time and now, so a late tick skips missed slots instead of bursting.
         const lastRuns = [schedule.nextRun, ...schedule.lastRuns].slice(0, RUN_HISTORY);
-        const nextRunAt = nextOccurrence(schedule.cron, Math.max(schedule.nextRun.at, now));
+        const nextRunAt = dueAfter(schedule.cron, Math.max(schedule.nextRun.at, now));
         const armed = await arm(ctx, id, schedule.target, schedule.payload, nextRunAt, now);
 
         ctx.set(scheduleKey(id), { ...schedule, ...armed, lastRuns });
@@ -173,32 +172,16 @@ async function arm(
   };
 }
 
-/** Validate and expand a cron expression into its stored representation. */
-function parseCron(expression: string, timezone: string): CronSpec {
-  const parsed = CronExpressionParser.parse(expression, { tz: timezone });
-  return {
-    expression,
-    normalized: parsed.fields.stringify(true),
-    timezone,
-    fields: parsed.fields.serialize(),
-  };
-}
-
-/** First occurrence strictly after `afterMs`, as epoch milliseconds. */
-function nextOccurrence(spec: CronSpec, afterMs: number): number {
-  try {
-    return CronExpressionParser.parse(spec.normalized, {
-      currentDate: new Date(afterMs),
-      tz: spec.timezone,
-    })
-      .next()
-      .getTime();
-  } catch (e) {
+/** Next occurrence after `afterMs`, or a terminal error when the expression has none. */
+function dueAfter(spec: CronSpec, afterMs: number): number {
+  const at = nextOccurrence(spec, afterMs);
+  if (at === undefined) {
     throw new restate.TerminalError(
-      `cron "${spec.expression}" has no occurrence after ${new Date(afterMs).toISOString()}: ${(e as Error).message}`,
+      `cron "${spec.expression}" has no occurrence after ${new Date(afterMs).toISOString()}`,
       { errorCode: 400 },
     );
   }
+  return at;
 }
 
 function notFound(id: string): restate.TerminalError {

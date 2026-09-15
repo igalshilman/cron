@@ -1,5 +1,5 @@
-import { CronExpressionParser } from "cron-parser";
 import { z } from "zod";
+import { CronSpec, isValidCron, isValidTimezone } from "./cron-expression.js";
 
 /** Header carrying the target address on every run. */
 export const TARGET_ADDRESS_HEADER = "x-target-address";
@@ -20,29 +20,8 @@ export const Run = z.object({
 });
 export type Run = z.infer<typeof Run>;
 
-/** One cron field, fully expanded by cron-parser: `values` lists every matching value, e.g. minute "0,15,30,45" -> [0, 15, 30, 45]. */
-const CronField = z.object({
-  wildcard: z.boolean(),
-  values: z.array(z.union([z.number(), z.string()])),
-});
-
-export const CronSpec = z.object({
-  expression: z.string(),
-  normalized: z.string(),
-  timezone: z.string(),
-  fields: z.object({
-    second: CronField,
-    minute: CronField,
-    hour: CronField,
-    dayOfMonth: CronField,
-    month: CronField,
-    dayOfWeek: CronField,
-  }),
-});
-export type CronSpec = z.infer<typeof CronSpec>;
-
 export const CreateScheduleRequest = z.object({
-  cron: z.string().min(1).refine(isParsableCron, { message: "invalid cron expression" }),
+  cron: z.string().min(1).refine(isValidCron, { message: "invalid cron expression" }),
   timezone: z.string().refine(isValidTimezone, { message: "unknown IANA timezone" }).default("UTC"),
   target: Target,
   payload: z.json().optional(),
@@ -63,21 +42,3 @@ export const Schedule = z.object({
   lastRuns: z.array(Run).max(3),
 });
 export type Schedule = z.infer<typeof Schedule>;
-
-function isParsableCron(expression: string): boolean {
-  try {
-    CronExpressionParser.parse(expression);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function isValidTimezone(timezone: string): boolean {
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: timezone });
-    return true;
-  } catch {
-    return false;
-  }
-}
