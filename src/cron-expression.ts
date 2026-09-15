@@ -65,3 +65,12 @@ export function isValidTimezone(timezone: string): boolean {
     return false;
   }
 }
+
+/** True when the expression fires at most once per minute, i.e. its seconds field is a single value. */
+export function hasMinuteResolution(expression: string): boolean {
+  try {
+    return CronExpressionParser.parse(expression).fields.second.values.length === 1;
+  } catch {
+    return true; // not our error to report; `isValidCron` covers it
+  }
+}

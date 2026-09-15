@@ -1,8 +1,10 @@
 import { z } from "zod";
-import { CronSpec, isValidCron, isValidTimezone } from "./cron-expression.js";
+import { CronSpec, hasMinuteResolution, isValidCron, isValidTimezone } from "./cron-expression.js";
 
-/** Header carrying the target address on every run. */
+/** Headers set on every run: the target address given at creation, the schedule id, and the occurrence (ISO-8601). */
 export const TARGET_ADDRESS_HEADER = "x-target-address";
+export const SCHEDULE_ID_HEADER = "x-schedule-id";
+export const SCHEDULED_FOR_HEADER = "x-scheduled-for";
 
 export const Target = z.object({
   service: z.string().min(1),
@@ -21,7 +23,13 @@ export const Run = z.object({
 export type Run = z.infer<typeof Run>;
 
 export const CreateScheduleRequest = z.object({
-  cron: z.string().min(1).refine(isValidCron, { message: "invalid cron expression" }),
+  cron: z
+    .string()
+    .min(1)
+    .refine(isValidCron, { message: "invalid cron expression" })
+    .refine(hasMinuteResolution, {
+      message: "schedules run at most once per minute: the seconds field must be a single value",
+    }),
   timezone: z.string().refine(isValidTimezone, { message: "unknown IANA timezone" }).default("UTC"),
   target: Target,
   payload: z.json().optional(),

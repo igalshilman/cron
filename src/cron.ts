@@ -4,6 +4,8 @@ import { type CronSpec, nextOccurrence, parseCron } from "./cron-expression.js";
 import {
   CreateScheduleRequest,
   Schedule,
+  SCHEDULE_ID_HEADER,
+  SCHEDULED_FOR_HEADER,
   ScheduleRef,
   TARGET_ADDRESS_HEADER,
   type Target,
@@ -34,6 +36,7 @@ export const cron = restate.object({
       {
         input: restate.serde.schema(CreateScheduleRequest),
         output: restate.serde.schema(Schedule),
+        journalRetention: 0, // bookkeeping: nothing to inspect after completion
       },
       async (ctx: Ctx, req) => {
         const id = ctx.rand.uuidv4();
@@ -57,23 +60,30 @@ export const cron = restate.object({
 
     /** Cancel the pending run and its tick, then forget the schedule. */
     delete: restate.createObjectHandler(
-      { input: restate.serde.schema(ScheduleRef) },
+      { input: restate.serde.schema(ScheduleRef), journalRetention: 0 },
       async (ctx: Ctx, { id }) => {
         const schedule = await ctx.get(scheduleKey(id));
         if (!schedule) {
           throw notFound(id);
         }
-        // Cancelling an invocation that already completed is a no-op, so this is safe at any point in the cycle.
-        ctx
-          .invocation(restate.InvocationIdParser.fromString(schedule.nextRun.invocationId))
-          .cancel();
+        // Only a run still in the future is cancelled. One that is already due may be executing, and dropping a
+        // schedule must not kill a workflow it has started.
+        if (schedule.nextRun.at > (await ctx.date.now())) {
+          ctx
+            .invocation(restate.InvocationIdParser.fromString(schedule.nextRun.invocationId))
+            .cancel();
+        }
         ctx.invocation(restate.InvocationIdParser.fromString(schedule.nextTickId)).cancel();
         ctx.clear(scheduleKey(id));
       },
     ),
 
     get: restate.createObjectSharedHandler(
-      { input: restate.serde.schema(ScheduleRef), output: restate.serde.schema(Schedule) },
+      {
+        input: restate.serde.schema(ScheduleRef),
+        output: restate.serde.schema(Schedule),
+        journalRetention: 0,
+      },
       async (ctx: SharedCtx, { id }) => {
         const schedule = await ctx.get(scheduleKey(id));
         if (!schedule) {
@@ -85,7 +95,7 @@ export const cron = restate.object({
 
     /** All schedules of this project, oldest first. */
     list: restate.createObjectSharedHandler(
-      { output: restate.serde.schema(z.array(Schedule)) },
+      { output: restate.serde.schema(z.array(Schedule)), journalRetention: 0 },
       async (ctx: SharedCtx) => {
         const schedules: Schedule[] = [];
         for (const key of (await ctx.stateKeys()).filter(isScheduleKey)) {
@@ -103,7 +113,11 @@ export const cron = restate.object({
      * Not callable from the ingress; only this object sends it to itself.
      */
     tick: restate.createObjectHandler(
-      { input: restate.serde.schema(ScheduleRef), ingressPrivate: true },
+      {
+        input: restate.serde.schema(ScheduleRef),
+        ingressPrivate: true,
+        journalRetention: { hours: 6 }, // keep recent ticks inspectable in the UI
+      },
       async (ctx: Ctx, { id }) => {
         const schedule = await ctx.get(scheduleKey(id));
         if (!schedule) {
@@ -147,7 +161,11 @@ async function arm(
     key: runId,
     parameter: payload,
     inputSerde: restate.serde.json,
-    headers: { [TARGET_ADDRESS_HEADER]: target.address },
+    headers: {
+      [TARGET_ADDRESS_HEADER]: target.address,
+      [SCHEDULE_ID_HEADER]: id,
+      [SCHEDULED_FOR_HEADER]: new Date(nextRunAt).toISOString(),
+    },
     delay,
     scope: ctx.key,
     name: `run:${id}:${runId}`,

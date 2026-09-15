@@ -7,7 +7,8 @@ target handler, typically the Restate Workflow that hosts a TanStack workflow ru
 
 - a fresh UUID `runId` as the target key, so every run is its own instance,
 - the project id as the request **scope** (`ctx.request().scope` on the target side),
-- an `x-target-address` header carrying the address supplied when the schedule was created,
+- headers: `x-target-address` (the address supplied at creation), `x-schedule-id`, and `x-scheduled-for` (the
+  occurrence as ISO-8601),
 - the schedule's JSON payload as the request body.
 
 ## Layout
@@ -38,23 +39,27 @@ Key: the project id. It doubles as the scope key, so it must match `[a-zA-Z0-9_.
    and `list` simply walks the key space.
 2. Arming queues two delayed one-way calls in Restate for the next occurrence:
    - the **run**: a `genericSend` to `target.service` / `target.handler`, keyed by a new `runId`, with `scope` set to
-     the project id and the `x-target-address` header. Restate owns the timer, so the run fires on time even while
-     this service is down or redeploying.
+     the project id and the three headers above. Restate owns the timer, so the run fires on time even while this
+     service is down or redeploying.
    - the **tick**: a self-call that moves the run into `lastRuns` (the last three), computes the next occurrence and
      arms again.
      Both invocation ids are stored on the schedule.
-3. `delete` cancels the pending run and tick by their invocation ids and clears the state key.
+3. `delete` cancels the pending tick, cancels the pending run only while it is still in the future, and clears the
+   state key. A run that is already due may be executing, and dropping a schedule never kills a workflow it started.
 
 Notes:
 
 - Occurrences come from [cron-parser](https://github.com/harrisiirak/cron-parser). Standard 5-field (minute) and
-  6-field (leading seconds) expressions are accepted and evaluated in `timezone` (default `UTC`).
+  6-field (leading seconds) expressions are accepted and evaluated in `timezone` (default `UTC`). Schedules run at
+  most once per minute: a 6-field expression must have a single value in its seconds field.
 - The stored `cron` keeps the original `expression`, the canonical `normalized` form that ticks re-parse, the
   `timezone`, and the expanded `fields` (every matching value per field) so a UI or SQL over state can explain the
   schedule without a cron library.
 - A late tick computes the next occurrence from the later of the planned time and now, so missed slots are skipped
   rather than fired in a burst.
 - A tick whose invocation id no longer matches `nextTickId`, or whose schedule was deleted, is a no-op.
+- Journal retention is zero for the bookkeeping handlers (`create`, `delete`, `get`, `list`) and six hours for
+  `tick`, so recent ticks stay inspectable in the UI without accumulating forever.
 
 ### Stored shape
 
