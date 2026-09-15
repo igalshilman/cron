@@ -1,0 +1,21 @@
+{
+  "name": "lovable-sched-api",
+  "version": "0.0.1",
+  "private": true,
+  "description": "A minimal Restate Virtual Object service in TypeScript",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch ./src/app.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmitOnError",
+    "start": "node ./dist/app.js"
+  },
+  "dependencies": {
+    "@restatedev/restate-sdk": "^1.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9"
+  }
+}
