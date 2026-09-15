@@ -1,8 +1,9 @@
 import * as restate from "@restatedev/restate-sdk";
-import { z } from "zod";
 import { type CronSpec, nextOccurrence, parseCron } from "./cron-expression.js";
 import {
   CreateScheduleRequest,
+  Project,
+  RUN_HISTORY,
   type Run,
   SCHEDULE_ID_HEADER,
   SCHEDULED_FOR_HEADER,
@@ -12,9 +13,6 @@ import {
   type Timer,
 } from "./schemas.js";
 
-const RUN_HISTORY = 3;
-
-/** Every schedule lives under its own state key, `schedule/<id>`. The project's one wake-up timer lives under `timer`. */
 type ScheduleKey = `schedule/${string}`;
 const scheduleKey = (id: string): ScheduleKey => `schedule/${id}`;
 const isScheduleKey = (key: string): key is ScheduleKey => key.startsWith("schedule/");
@@ -23,13 +21,6 @@ type State = Record<ScheduleKey, Schedule> & { timer: Timer };
 type Ctx = restate.ObjectContext<State>;
 type SharedCtx = restate.ObjectSharedContext<State>;
 
-/**
- * A per-project cron scheduler. The object key is the project id.
- *
- * One delayed self-call (`wake`) per project, armed for the earliest upcoming run. When it fires, every due schedule
- * is dispatched to its target and advanced, and the timer is armed again. Create and delete re-arm it when they
- * change which run is earliest.
- */
 export const cron = restate.object({
   name: "cron",
   handlers: {
@@ -59,7 +50,6 @@ export const cron = restate.object({
       },
     ),
 
-    /** Drop a schedule. Runs already dispatched keep running; only future occurrences disappear. */
     delete: restate.createObjectHandler(
       { input: restate.serde.schema(ScheduleRef), journalRetention: 0 },
       async (ctx: Ctx, { id }) => {
@@ -86,10 +76,12 @@ export const cron = restate.object({
       },
     ),
 
-    /** All schedules of this project, oldest first. */
     list: restate.createObjectSharedHandler(
-      { output: restate.serde.schema(z.array(Schedule)), journalRetention: 0 },
-      async (ctx: SharedCtx) => loadSchedules(ctx),
+      { output: restate.serde.schema(Project), journalRetention: 0 },
+      async (ctx: SharedCtx) => ({
+        timer: await ctx.get("timer"),
+        schedules: await loadSchedules(ctx),
+      }),
     ),
 
     /**
@@ -106,19 +98,26 @@ export const cron = restate.object({
         ctx.clear("timer");
 
         const now = await ctx.date.now();
-        for (const schedule of await loadSchedules(ctx)) {
-          if (schedule.nextRunAt > now) {
-            continue;
-          }
+        const schedules = await loadSchedules(ctx);
+        const due = schedules.filter((schedule) => schedule.nextRunAt <= now);
+
+        const advanced: Schedule[] = [];
+        for (const schedule of due) {
           const run = await dispatch(ctx, schedule);
-          ctx.set(scheduleKey(schedule.id), {
+          advanced.push({
             ...schedule,
             lastRuns: [run, ...schedule.lastRuns].slice(0, RUN_HISTORY),
             // Occurrences missed while the wake-up was late collapse into the single run above.
             nextRunAt: dueAfter(schedule.cron, now),
           });
         }
-        await armTimer(ctx, now);
+        for (const schedule of advanced) {
+          ctx.set(scheduleKey(schedule.id), schedule);
+        }
+        await armTimer(ctx, now, [
+          ...schedules.filter((schedule) => schedule.nextRunAt > now),
+          ...advanced,
+        ]);
       },
     ),
   },
@@ -145,8 +144,8 @@ async function dispatch(ctx: Ctx, schedule: Schedule): Promise<Run> {
 }
 
 /** Point the project's single timer at the earliest upcoming run, replacing it only when that moment changed. */
-async function armTimer(ctx: Ctx, now: number): Promise<void> {
-  const schedules = await loadSchedules(ctx);
+async function armTimer(ctx: Ctx, now: number, schedules?: Schedule[]): Promise<void> {
+  schedules ??= await loadSchedules(ctx);
   const wakeUpAt = schedules.length ? Math.min(...schedules.map((s) => s.nextRunAt)) : undefined;
 
   const timer = await ctx.get("timer");
@@ -155,9 +154,9 @@ async function armTimer(ctx: Ctx, now: number): Promise<void> {
   }
   if (timer) {
     ctx.invocation(restate.InvocationIdParser.fromString(timer.invocationId)).cancel();
-    ctx.clear("timer");
   }
   if (wakeUpAt === undefined) {
+    ctx.clear("timer");
     return;
   }
 
@@ -177,7 +176,7 @@ async function armTimer(ctx: Ctx, now: number): Promise<void> {
 
 async function loadSchedules(ctx: SharedCtx): Promise<Schedule[]> {
   const schedules: Schedule[] = [];
-  for (const key of (await ctx.stateKeys()).filter(isScheduleKey).sort()) {
+  for (const key of (await ctx.stateKeys()).filter(isScheduleKey)) {
     const schedule = await ctx.get(key);
     if (schedule) {
       schedules.push(schedule);

@@ -24,20 +24,22 @@ target handler, typically the Restate Workflow that hosts a TanStack workflow ru
 
 Key: the project id. It doubles as the scope key, so it must match `[a-zA-Z0-9_.-]{1,36}`; a UUID does.
 
-| Handler  | Kind                       | Input                   | Output       |
-| -------- | -------------------------- | ----------------------- | ------------ |
-| `create` | exclusive                  | `CreateScheduleRequest` | `Schedule`   |
-| `delete` | exclusive                  | `{ id }`                | -            |
-| `get`    | shared                     | `{ id }`                | `Schedule`   |
-| `list`   | shared                     | -                       | `Schedule[]` |
-| `wake`   | exclusive, ingress-private | -                       | -            |
+| Handler  | Kind                       | Input                   | Output     |
+| -------- | -------------------------- | ----------------------- | ---------- |
+| `create` | exclusive                  | `CreateScheduleRequest` | `Schedule` |
+| `delete` | exclusive                  | `{ id }`                | -          |
+| `get`    | shared                     | `{ id }`                | `Schedule` |
+| `list`   | shared                     | -                       | `Project`  |
+| `wake`   | exclusive, ingress-private | -                       | -          |
 
 ### How a schedule runs
 
 1. `create` validates the cron expression and timezone, assigns a schedule id, computes the next occurrence and
    stores the schedule under its own state key, `schedule/<id>`.
 2. Each project has a single timer: one delayed self-call to `wake`, armed for the earliest `nextRunAt` across
-   its schedules and recorded under the `timer` state key. `create` and `delete` re-arm it only when the earliest
+   its schedules and recorded under the `timer` state key. `list` returns it next to the schedules, as
+   `{ timer, schedules }`: `timer` is null once a project has no schedules, so a project with schedules and no
+   timer is stuck, and `timer.invocationId` is the pending wake-up to look up in the Restate UI. `create` and `delete` re-arm it only when the earliest
    moment changes. A project costs one object and one pending invocation, whatever its number of schedules.
 3. When `wake` fires it dispatches every due schedule with a `genericSend` to `target.service` / `target.handler`,
    keyed by a new `runId`, with `scope` set to the project id and the three headers above. It records the run in
@@ -85,7 +87,14 @@ Notes:
 }
 ```
 
-The project's timer is a separate state entry: `"timer": { "invocationId": "inv_...", "wakeUpAt": 1789484400000 }`.
+`list` wraps the schedules with the project's timer:
+
+```json
+{
+  "timer": { "invocationId": "inv_1ir2UWPz...", "wakeUpAt": 1789484400000 },
+  "schedules": [{ "id": "2a8658e7-...", "...": "..." }]
+}
+```
 
 ## Requirements
 

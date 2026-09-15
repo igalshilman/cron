@@ -1,10 +1,13 @@
 import { z } from "zod";
-import { CronSpec, hasMinuteResolution, isValidCron, isValidTimezone } from "./cron-expression.js";
+import { CronSpec, cronProblem, isValidTimezone } from "./cron-expression.js";
 
 /** Headers set on every run: the target address given at creation, the schedule id, and the occurrence (ISO-8601). */
 export const TARGET_ADDRESS_HEADER = "x-target-address";
 export const SCHEDULE_ID_HEADER = "x-schedule-id";
 export const SCHEDULED_FOR_HEADER = "x-scheduled-for";
+
+/** How many past runs a schedule remembers. */
+export const RUN_HISTORY = 3;
 
 export const Target = z.object({
   service: z.string().min(1),
@@ -33,9 +36,11 @@ export const CreateScheduleRequest = z.object({
   cron: z
     .string()
     .min(1)
-    .refine(isValidCron, { message: "invalid cron expression" })
-    .refine(hasMinuteResolution, {
-      message: "schedules run at most once per minute: the seconds field must be a single value",
+    .superRefine((expression, ctx) => {
+      const problem = cronProblem(expression);
+      if (problem) {
+        ctx.addIssue({ code: "custom", message: problem });
+      }
     }),
   timezone: z.string().refine(isValidTimezone, { message: "unknown IANA timezone" }).default("UTC"),
   target: Target,
@@ -54,6 +59,13 @@ export const Schedule = z.object({
   createdAt: z.number(),
   /** Epoch milliseconds of the next occurrence. */
   nextRunAt: z.number(),
-  lastRuns: z.array(Run).max(3),
+  lastRuns: z.array(Run).max(RUN_HISTORY),
 });
 export type Schedule = z.infer<typeof Schedule>;
+
+/** What `list` returns: the project's pending wake-up (null when it has no schedules) and its schedules. */
+export const Project = z.object({
+  timer: Timer.nullable(),
+  schedules: z.array(Schedule),
+});
+export type Project = z.infer<typeof Project>;
