@@ -1,8 +1,8 @@
 import * as restate from "@restatedev/restate-sdk";
-import { counter } from "./counter.js";
+import { cron } from "./cron.js";
 
-// Expose the Virtual Object over HTTP/2 so a Restate server can register and invoke it.
-restate.serve({
-  services: [counter],
+// Expose the cron Virtual Object over HTTP/2 so a Restate server can register and invoke it.
+await restate.serve({
+  services: [cron],
   port: 9080,
 });
