@@ -89,7 +89,7 @@ export const cron = restate.object({
      * Not callable from the ingress; only this object sends it to itself.
      */
     wake: restate.createObjectHandler(
-      { ingressPrivate: true, journalRetention: { hours: 6 } },
+      { ingressPrivate: true },
       async (ctx: Ctx) => {
         const timer = await ctx.get("timer");
         if (timer?.invocationId !== ctx.request().id) {
@@ -121,6 +121,9 @@ export const cron = restate.object({
       },
     ),
   },
+  options: {
+    journalRetention: { minutes: 10 }
+  }
 });
 
 /** Send one run to its target: a fresh runId as the key, the project id as the scope, the occurrence in headers. */
