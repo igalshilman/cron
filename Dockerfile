@@ -2,7 +2,7 @@
 
 # Builder, pinned by digest. It runs on the build host's platform: the output is JavaScript plus pure JS/WASM
 # node_modules, both architecture-independent, so multi-arch images need no emulated installs.
-FROM --platform=$BUILDPLATFORM node:26-bookworm-slim@sha256:cd9f682fa2885cd1056e830424764158570061c59736a1da836bc3d73df095ae AS base
+FROM --platform=$BUILDPLATFORM node:26-bookworm-slim@sha256:662933cf47f013bc8e4beb31a6116448427a82057ba7c42c97e4c5ba766504c2 AS base
 RUN npm install -g pnpm@11.25.0
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
