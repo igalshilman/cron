@@ -88,42 +88,39 @@ export const cron = restate.object({
      * Internal: the timer. Dispatches every due schedule, advances it, and arms the next wake-up.
      * Not callable from the ingress; only this object sends it to itself.
      */
-    wake: restate.createObjectHandler(
-      { ingressPrivate: true },
-      async (ctx: Ctx) => {
-        const timer = await ctx.get("timer");
-        if (timer?.invocationId !== ctx.request().id) {
-          return; // superseded: a newer timer owns the wake-up
-        }
-        ctx.clear("timer");
+    wake: restate.createObjectHandler({ ingressPrivate: true }, async (ctx: Ctx) => {
+      const timer = await ctx.get("timer");
+      if (timer?.invocationId !== ctx.request().id) {
+        return; // superseded: a newer timer owns the wake-up
+      }
+      ctx.clear("timer");
 
-        const now = await ctx.date.now();
-        const schedules = await loadSchedules(ctx);
-        const due = schedules.filter((schedule) => schedule.nextRunAt <= now);
+      const now = await ctx.date.now();
+      const schedules = await loadSchedules(ctx);
+      const due = schedules.filter((schedule) => schedule.nextRunAt <= now);
 
-        const advanced: Schedule[] = [];
-        for (const schedule of due) {
-          const run = await dispatch(ctx, schedule);
-          advanced.push({
-            ...schedule,
-            lastRuns: [run, ...schedule.lastRuns].slice(0, RUN_HISTORY),
-            // Occurrences missed while the wake-up was late collapse into the single run above.
-            nextRunAt: dueAfter(schedule.cron, now),
-          });
-        }
-        for (const schedule of advanced) {
-          ctx.set(scheduleKey(schedule.id), schedule);
-        }
-        await armTimer(ctx, now, [
-          ...schedules.filter((schedule) => schedule.nextRunAt > now),
-          ...advanced,
-        ]);
-      },
-    ),
+      const advanced: Schedule[] = [];
+      for (const schedule of due) {
+        const run = await dispatch(ctx, schedule);
+        advanced.push({
+          ...schedule,
+          lastRuns: [run, ...schedule.lastRuns].slice(0, RUN_HISTORY),
+          // Occurrences missed while the wake-up was late collapse into the single run above.
+          nextRunAt: dueAfter(schedule.cron, now),
+        });
+      }
+      for (const schedule of advanced) {
+        ctx.set(scheduleKey(schedule.id), schedule);
+      }
+      await armTimer(ctx, now, [
+        ...schedules.filter((schedule) => schedule.nextRunAt > now),
+        ...advanced,
+      ]);
+    }),
   },
   options: {
-    journalRetention: { minutes: 10 }
-  }
+    journalRetention: { minutes: 10 },
+  },
 });
 
 /** Send one run to its target: a fresh runId as the key, the project id as the scope, the occurrence in headers. */
