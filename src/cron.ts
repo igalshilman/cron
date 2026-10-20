@@ -124,8 +124,8 @@ export const cron = restate.object({
 
 /**
  * Send one run to its target: a fresh runId as the idempotency key, the project id as the scope, the occurrence in
- * headers. No key: the target is a plain Service (e.g. a TanStack workflow's `run`, which requires the idempotency key)
- * or a Workflow's shared handler; the relay tells Restate its real type from the schema registry.
+ * headers. No key: the target must be a plain Service (e.g. a TanStack workflow's `run`, which requires the idempotency
+ * key); the relay tells Restate its real type from the schema registry.
  */
 async function dispatch(ctx: Ctx, schedule: Schedule): Promise<Run> {
   const runId = ctx.rand.uuidv4();

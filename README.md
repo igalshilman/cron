@@ -2,14 +2,18 @@
 
 A per-project cron scheduler built as a [Restate](https://restate.dev) Virtual Object in TypeScript.
 
-Each project (a UUID) owns one `cron` object holding its schedules. On every occurrence the object fires a keyed
-target handler, typically the Restate Workflow that hosts a TanStack workflow run, with:
+Each project (a UUID) owns one `cron` object holding its schedules. On every occurrence the object sends a request to
+a target Service handler, typically the `run` handler of a TanStack workflow service, with:
 
-- a fresh UUID `runId` as the target key, so every run is its own instance,
+- a fresh UUID `runId` as the **idempotency key**, so every run is its own invocation (no key: the target is a plain
+  Service),
 - the project id as the request **scope** (`ctx.request().scope` on the target side),
-- headers: `x-target-address` (the address supplied at creation), `x-schedule-id`, and `x-scheduled-for` (the
-  occurrence as ISO-8601),
+- headers: `x-schedule-id` and `x-scheduled-for` (the occurrence as ISO-8601),
 - the schedule's JSON payload as the request body.
+
+It's built for the schemaless Restate setup: Restate keeps no catalog of these services, a schema registry does, and the
+relay tells Restate what it needs from it (see [Running with the schemaless runtime](#running-with-the-schemaless-runtime)).
+It also runs on a plain Restate for local development.
 
 ## Layout
 
@@ -42,7 +46,8 @@ Key: the project id. It doubles as the scope key, so it must match `[a-zA-Z0-9_.
    timer is stuck, and `timer.invocationId` is the pending wake-up to look up in the Restate UI. `create` and `delete` re-arm it only when the earliest
    moment changes. A project costs one object and one pending invocation, whatever its number of schedules.
 3. When `wake` fires it dispatches every due schedule with a `genericSend` to `target.service` / `target.handler`,
-   keyed by a new `runId`, with `scope` set to the project id and the three headers above. It records the run in
+   with a new `runId` as the idempotency key, `scope` set to the project id and the two headers above. The run's
+   invocation id is deterministic (target + idempotency key), so it's known right away. It records the run in
    `lastRuns` (the last three), advances `nextRunAt`, and arms the timer again.
 4. `delete` clears the state key and re-arms. Runs already dispatched keep running; only future occurrences
    disappear.
@@ -58,8 +63,14 @@ Notes:
 - Occurrences missed while a wake-up was late collapse into one run, and the schedule jumps to the next future
   occurrence. The `x-scheduled-for` header carries the occurrence the run stands for.
 - A `wake` whose invocation id no longer matches the stored timer is a no-op.
-- Journal retention is zero for the bookkeeping handlers (`create`, `delete`, `get`, `list`) and six hours for
-  `wake`, so recent wake-ups stay inspectable in the UI without accumulating forever.
+- Journal retention is zero for the bookkeeping handlers (`create`, `delete`, `get`, `list`) and ten minutes for
+  `wake`, so recent wake-ups stay inspectable in the UI without accumulating forever. With the schemaless runtime these
+  values come from the cron's schema registry entry and from the caller, not from the code (see below).
+- Each run is an idempotent invocation: its result is kept for the target's idempotency retention, which the relay
+  takes from the target's schema registry entry (Restate's server default, `[invocation] default-idempotency-retention`,
+  when the entry has none).
+- `target.address` is accepted and stored for older clients, but unused: the schema registry owns where a service
+  runs. Runs no longer get an `x-target-address` header.
 
 ### Stored shape
 
@@ -68,8 +79,7 @@ Notes:
   "id": "2a8658e7-bff3-4903-87de-7fb87c3d3b76",
   "target": {
     "service": "checkout",
-    "handler": "run",
-    "address": "https://example.com/api/checkout"
+    "handler": "run"
   },
   "payload": { "userId": "Francesco", "amount": 10 },
   "cron": {
@@ -108,11 +118,60 @@ Notes:
 
   Without them the scoped send fails with a retryable error and `create` keeps retrying.
 
-- Targets must be Workflows or plain Services. Restate 1.7 rejects scoped calls to Virtual Object targets
-  (`scope is not supported for Virtual Object targets`, error RT0017) unless the server's scoped-virtual-objects
-  feature is enabled.
+- Targets must be plain Services (handlers that take an idempotency key). Virtual Objects and Workflows need a key,
+  which the cron doesn't send, so Restate rejects the run.
 
-## Run it
+## Running with the schemaless runtime
+
+The cluster setup (`cluster-setup`) wires this up; the pieces, for reference:
+
+- Restate (the `schemaless-plus-preflight` build) sends every service it doesn't have registered to the relay in
+  preflight mode, and has the generic invoke endpoint on (`[ingress] experimental-generic-invoke = true`).
+- The cron is **not** registered in Restate. It's registered in the schema registry as a **shared** deployment (no
+  tenant), and Restate reaches it through the relay: `schema-registry/demo/cron.json` is the entry for the demo
+  cluster. Its targets (e.g. `checkout`) are registered there too, shared or per tenant (a tenant = a project id).
+- On every call the cron makes (the run, its own delayed `wake`), the relay looks the callee up in the registry and
+  tells Restate its type and retentions. The cron runs unscoped (platform code), so the relay keeps the scope it chose:
+  the project id for runs, none for `wake`.
+
+Restate's regular `/cron/...` ingress paths answer `404` for a service it doesn't have registered. Until the ingress
+mux (which will translate them), the cron's handlers are called through the generic invoke endpoint, with a JSON
+envelope that carries the target type Restate can't look up:
+
+| Handler            | `targetType`               |
+| ------------------ | -------------------------- |
+| `create`, `delete` | `virtual_object_exclusive` |
+| `get`, `list`      | `virtual_object_shared`    |
+
+```sh
+RESTATE=http://localhost:8080
+PROJECT=$(uuidgen | tr 'A-Z' 'a-z')
+
+# cron <call|send> <handler> <targetType> [json input]
+# journalRetentionMillis 0: the bookkeeping handlers keep no journal (what the cron's code declares).
+cron() {
+  jq -n --arg handler "$2" --arg targetType "$3" --arg key "$PROJECT" --arg input "${4:-}" '{
+      service: "cron", handler: $handler, targetType: $targetType, key: $key,
+      payload: ($input | @base64), journalRetentionMillis: 0 }' |
+    curl -s "$RESTATE/restate/generic/$1" -d @- \
+      -H 'content-type: application/vnd.restate.generic-invocation.v1+json'
+}
+
+cron call create virtual_object_exclusive '{
+  "cron": "*/5 * * * *",
+  "timezone": "Europe/Berlin",
+  "target": { "service": "checkout", "handler": "run" },
+  "payload": { "userId": "alice", "amount": 4200 }
+}'
+cron call list virtual_object_shared
+cron call get virtual_object_shared '{ "id": "<schedule id>" }'
+cron call delete virtual_object_exclusive '{ "id": "<schedule id>" }'
+```
+
+The envelope (`02-contract.md` §3 in the design docs) has no `scope`: the cron itself runs unscoped and picks the
+project scope for its runs.
+
+## Run it locally (plain Restate)
 
 1. Install and start the service in watch mode:
 
@@ -130,7 +189,7 @@ Notes:
    #       docker.restate.dev/restatedev/restate:latest
    ```
 
-3. Register this service (and the target service you want to schedule):
+3. Register this service (and the target service you want to schedule) in Restate:
 
    ```sh
    npx @restatedev/restate deployments register http://localhost:9080
@@ -145,7 +204,7 @@ Notes:
    curl localhost:8080/cron/$PROJECT/create --json '{
      "cron": "*/5 * * * *",
      "timezone": "Europe/Berlin",
-     "target": { "service": "MyWorkflow", "handler": "run", "address": "wf://reports/daily" },
+     "target": { "service": "MyService", "handler": "run" },
      "payload": { "report": "daily" }
    }'
 
