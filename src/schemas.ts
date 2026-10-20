@@ -1,8 +1,7 @@
 import { z } from "zod";
 import { CronSpec, cronProblem, isValidTimezone } from "./cron-expression.js";
 
-/** Headers set on every run: the target address given at creation, the schedule id, and the occurrence (ISO-8601). */
-export const TARGET_ADDRESS_HEADER = "x-target-address";
+/** Headers set on every run: the schedule id and the occurrence (ISO-8601). */
 export const SCHEDULE_ID_HEADER = "x-schedule-id";
 export const SCHEDULED_FOR_HEADER = "x-scheduled-for";
 
@@ -12,7 +11,8 @@ export const RUN_HISTORY = 3;
 export const Target = z.object({
   service: z.string().min(1),
   handler: z.string().min(1),
-  address: z.string().min(1),
+  /** Unused: the schema registry owns the target's address. Still accepted and stored for older clients. */
+  address: z.string().min(1).optional(),
 });
 export type Target = z.infer<typeof Target>;
 

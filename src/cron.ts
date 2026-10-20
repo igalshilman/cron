@@ -9,7 +9,6 @@ import {
   SCHEDULED_FOR_HEADER,
   Schedule,
   ScheduleRef,
-  TARGET_ADDRESS_HEADER,
   type Timer,
 } from "./schemas.js";
 
@@ -123,17 +122,20 @@ export const cron = restate.object({
   },
 });
 
-/** Send one run to its target: a fresh runId as the key, the project id as the scope, the occurrence in headers. */
+/**
+ * Send one run to its target: a fresh runId as the idempotency key, the project id as the scope, the occurrence in
+ * headers. No key: the target is a plain Service (e.g. a TanStack workflow's `run`, which requires the idempotency key)
+ * or a Workflow's shared handler; the relay tells Restate its real type from the schema registry.
+ */
 async function dispatch(ctx: Ctx, schedule: Schedule): Promise<Run> {
   const runId = ctx.rand.uuidv4();
   const handle = ctx.genericSend({
     service: schedule.target.service,
     method: schedule.target.handler,
-    key: runId,
+    idempotencyKey: runId,
     parameter: schedule.payload,
     inputSerde: restate.serde.json,
     headers: {
-      [TARGET_ADDRESS_HEADER]: schedule.target.address,
       [SCHEDULE_ID_HEADER]: schedule.id,
       [SCHEDULED_FOR_HEADER]: new Date(schedule.nextRunAt).toISOString(),
     },
