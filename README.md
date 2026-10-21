@@ -153,7 +153,7 @@ cron() {
   jq -n --arg handler "$2" --arg targetType "$3" --arg key "$PROJECT" --arg input "${4:-}" '{
       service: "cron", handler: $handler, targetType: $targetType, key: $key,
       payload: ($input | @base64), journalRetentionMillis: 0 }' |
-    curl -s "$RESTATE/restate/generic/$1" -d @- \
+    curl -s "$RESTATE/restate/$1" -d @- \
       -H 'content-type: application/vnd.restate.generic-invocation.v1+json'
 }
 
