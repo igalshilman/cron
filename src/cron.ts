@@ -10,6 +10,7 @@ import {
   Schedule,
   ScheduleRef,
   type Timer,
+  UpdateScheduleRequest,
 } from "./schemas.js";
 
 type ScheduleKey = `schedule/${string}`;
@@ -44,6 +45,38 @@ export const cron = restate.object({
           lastRuns: [],
         };
         ctx.set(scheduleKey(id), schedule);
+        await armTimer(ctx, now);
+        return schedule;
+      },
+    ),
+
+    /**
+     * Replace a schedule's definition (cron, timezone, target, payload). Its id, creation time and past runs stay; the
+     * next run is recomputed from now. Runs already dispatched aren't affected.
+     */
+    update: restate.createObjectHandler(
+      {
+        input: restate.serde.schema(UpdateScheduleRequest),
+        output: restate.serde.schema(Schedule),
+        journalRetention: 0,
+      },
+      async (ctx: Ctx, req) => {
+        const existing = await ctx.get(scheduleKey(req.id));
+        if (!existing) {
+          throw notFound(req.id);
+        }
+        const now = await ctx.date.now();
+        const spec = parseCron(req.cron, req.timezone);
+
+        const schedule: Schedule = {
+          ...existing,
+          target: req.target,
+          payload: req.payload,
+          cron: spec,
+          updatedAt: now,
+          nextRunAt: dueAfter(spec, now),
+        };
+        ctx.set(scheduleKey(req.id), schedule);
         await armTimer(ctx, now);
         return schedule;
       },

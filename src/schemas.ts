@@ -48,6 +48,10 @@ export const CreateScheduleRequest = z.object({
 });
 export type CreateScheduleRequest = z.infer<typeof CreateScheduleRequest>;
 
+/** A schedule's new definition: replaces its cron, timezone, target and payload; its id, creation time and runs stay. */
+export const UpdateScheduleRequest = CreateScheduleRequest.extend({ id: z.string().min(1) });
+export type UpdateScheduleRequest = z.infer<typeof UpdateScheduleRequest>;
+
 export const ScheduleRef = z.object({ id: z.string().min(1) });
 export type ScheduleRef = z.infer<typeof ScheduleRef>;
 
@@ -57,6 +61,8 @@ export const Schedule = z.object({
   payload: z.json().optional(),
   cron: CronSpec,
   createdAt: z.number(),
+  /** Epoch milliseconds of the last `update`; absent if never updated. */
+  updatedAt: z.number().optional(),
   /** Epoch milliseconds of the next occurrence. */
   nextRunAt: z.number(),
   lastRuns: z.array(Run).max(RUN_HISTORY),

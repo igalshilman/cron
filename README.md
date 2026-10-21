@@ -34,6 +34,7 @@ sends its runs and its own wake-ups in its scope (none for an unscoped object). 
 | Handler  | Kind                       | Input                   | Output     |
 | -------- | -------------------------- | ----------------------- | ---------- |
 | `create` | exclusive                  | `CreateScheduleRequest` | `Schedule` |
+| `update` | exclusive                  | `UpdateScheduleRequest` | `Schedule` |
 | `delete` | exclusive                  | `{ id }`                | -          |
 | `get`    | shared                     | `{ id }`                | `Schedule` |
 | `list`   | shared                     | -                       | `Project`  |
@@ -46,13 +47,17 @@ sends its runs and its own wake-ups in its scope (none for an unscoped object). 
 2. Each object has a single timer: one delayed self-call to `wake`, armed for the earliest `nextRunAt` across
    its schedules and recorded under the `timer` state key. `list` returns it next to the schedules, as
    `{ timer, schedules }`: `timer` is null once the object has no schedules, so an object with schedules and no
-   timer is stuck, and `timer.invocationId` is the pending wake-up to look up in the Restate UI. `create` and `delete` re-arm it only when the earliest
+   timer is stuck, and `timer.invocationId` is the pending wake-up to look up in the Restate UI. `create`, `update` and `delete` re-arm it only when the earliest
    moment changes. A tenant costs one object and one pending invocation, whatever its number of schedules.
 3. When `wake` fires it dispatches every due schedule with a `genericSend` to `target.service` / `target.handler`,
    with a new `runId` as the idempotency key, the object's own scope and the two headers above. The run's
    invocation id is deterministic (target + idempotency key), so it's known right away. It records the run in
    `lastRuns` (the last three), advances `nextRunAt`, and arms the timer again.
-4. `delete` clears the state key and re-arms. Runs already dispatched keep running; only future occurrences
+4. `update` takes `{ id }` plus a whole new definition (the fields of `CreateScheduleRequest`: `cron`, `timezone`,
+   `target`, `payload`; a field left out is gone, e.g. the payload) and validates it like `create`. The schedule
+   keeps its id, `createdAt` and `lastRuns`, gets `updatedAt`, and its `nextRunAt` is recomputed from now; then
+   the timer is re-armed. Runs already dispatched aren't affected. An unknown id ⇒ `404`.
+5. `delete` clears the state key and re-arms. Runs already dispatched keep running; only future occurrences
    disappear.
 
 Notes:
@@ -66,7 +71,7 @@ Notes:
 - Occurrences missed while a wake-up was late collapse into one run, and the schedule jumps to the next future
   occurrence. The `x-scheduled-for` header carries the occurrence the run stands for.
 - A `wake` whose invocation id no longer matches the stored timer is a no-op.
-- Journal retention is zero for the bookkeeping handlers (`create`, `delete`, `get`, `list`) and ten minutes for
+- Journal retention is zero for the bookkeeping handlers (`create`, `update`, `delete`, `get`, `list`) and ten minutes for
   `wake`, so recent wake-ups stay inspectable in the UI without accumulating forever. With the schemaless runtime these
   values come from the cron's schema registry entry and from the caller, not from the code (see below).
 - Each run is an idempotent invocation: its result is kept for the target's idempotency retention, which the relay
@@ -159,10 +164,10 @@ curl $MUX/restate/scope/$TENANT/call/cron/default/create -H "authorization: Bear
 Without the mux, call Restate's generic invoke endpoint directly, with a JSON envelope (`02-contract.md` §3 in the
 design docs) that carries the scope and the target type Restate can't look up:
 
-| Handler            | `targetType`               |
-| ------------------ | -------------------------- |
-| `create`, `delete` | `virtual_object_exclusive` |
-| `get`, `list`      | `virtual_object_shared`    |
+| Handler                      | `targetType`               |
+| ---------------------------- | -------------------------- |
+| `create`, `update`, `delete` | `virtual_object_exclusive` |
+| `get`, `list`                | `virtual_object_shared`    |
 
 ```sh
 RESTATE=http://localhost:8080
@@ -186,6 +191,13 @@ cron call create virtual_object_exclusive '{
 }'
 cron call list virtual_object_shared
 cron call get virtual_object_shared '{ "id": "<schedule id>" }'
+cron call update virtual_object_exclusive '{
+  "id": "<schedule id>",
+  "cron": "0 9 * * 1-5",
+  "timezone": "Europe/Berlin",
+  "target": { "service": "checkout", "handler": "run" },
+  "payload": { "userId": "alice", "amount": 4200 }
+}'
 cron call delete virtual_object_exclusive '{ "id": "<schedule id>" }'
 ```
 
