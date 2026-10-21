@@ -123,9 +123,9 @@ export const cron = restate.object({
 });
 
 /**
- * Send one run to its target: a fresh runId as the idempotency key, the project id as the scope, the occurrence in
- * headers. No key: the target must be a plain Service (e.g. a TanStack workflow's `run`, which requires the idempotency
- * key); the relay tells Restate its real type from the schema registry.
+ * Send one run to its target: a fresh runId as the idempotency key, this object's own scope (the tenant's), the
+ * occurrence in headers. No key: the target must be a plain Service (e.g. a TanStack workflow's `run`, which requires
+ * the idempotency key); the relay tells Restate its real type from the schema registry.
  */
 async function dispatch(ctx: Ctx, schedule: Schedule): Promise<Run> {
   const runId = ctx.rand.uuidv4();
@@ -139,7 +139,7 @@ async function dispatch(ctx: Ctx, schedule: Schedule): Promise<Run> {
       [SCHEDULE_ID_HEADER]: schedule.id,
       [SCHEDULED_FOR_HEADER]: new Date(schedule.nextRunAt).toISOString(),
     },
-    scope: ctx.key,
+    scope: ctx.request().scope,
     name: `run:${schedule.id}:${runId}`,
   });
   return { runId, invocationId: await handle.invocationId, at: schedule.nextRunAt };

@@ -1,13 +1,14 @@
 # cron
 
-A per-project cron scheduler built as a [Restate](https://restate.dev) Virtual Object in TypeScript.
+A per-tenant cron scheduler built as a [Restate](https://restate.dev) Virtual Object in TypeScript.
 
-Each project (a UUID) owns one `cron` object holding its schedules. On every occurrence the object sends a request to
-a target Service handler, typically the `run` handler of a TanStack workflow service, with:
+Each tenant (a Restate scope, e.g. a project UUID) has one `cron` object, `cron/default` in its scope, holding its
+schedules. On every occurrence the object sends a request to a target Service handler, typically the `run` handler of
+a TanStack workflow service, with:
 
 - a fresh UUID `runId` as the **idempotency key**, so every run is its own invocation (no key: the target is a plain
   Service),
-- the project id as the request **scope** (`ctx.request().scope` on the target side),
+- the object's own **scope**, so runs land in the tenant's scope (`ctx.request().scope` on the target side),
 - headers: `x-schedule-id` and `x-scheduled-for` (the occurrence as ISO-8601),
 - the schedule's JSON payload as the request body.
 
@@ -26,7 +27,9 @@ It also runs on a plain Restate for local development.
 
 ## The `cron` object
 
-Key: the project id. It doubles as the scope key, so it must match `[a-zA-Z0-9_.-]{1,36}`; a UUID does.
+Scope: the tenant. Key: `default` by convention (one object per tenant); the code doesn't depend on it. The object
+sends its runs and its own wake-ups in its scope (none for an unscoped object). A scope must match
+`[a-zA-Z0-9_.-]{1,36}`; a UUID does.
 
 | Handler  | Kind                       | Input                   | Output     |
 | -------- | -------------------------- | ----------------------- | ---------- |
@@ -40,13 +43,13 @@ Key: the project id. It doubles as the scope key, so it must match `[a-zA-Z0-9_.
 
 1. `create` validates the cron expression and timezone, assigns a schedule id, computes the next occurrence and
    stores the schedule under its own state key, `schedule/<id>`.
-2. Each project has a single timer: one delayed self-call to `wake`, armed for the earliest `nextRunAt` across
+2. Each object has a single timer: one delayed self-call to `wake`, armed for the earliest `nextRunAt` across
    its schedules and recorded under the `timer` state key. `list` returns it next to the schedules, as
-   `{ timer, schedules }`: `timer` is null once a project has no schedules, so a project with schedules and no
+   `{ timer, schedules }`: `timer` is null once the object has no schedules, so an object with schedules and no
    timer is stuck, and `timer.invocationId` is the pending wake-up to look up in the Restate UI. `create` and `delete` re-arm it only when the earliest
-   moment changes. A project costs one object and one pending invocation, whatever its number of schedules.
+   moment changes. A tenant costs one object and one pending invocation, whatever its number of schedules.
 3. When `wake` fires it dispatches every due schedule with a `genericSend` to `target.service` / `target.handler`,
-   with a new `runId` as the idempotency key, `scope` set to the project id and the two headers above. The run's
+   with a new `runId` as the idempotency key, the object's own scope and the two headers above. The run's
    invocation id is deterministic (target + idempotency key), so it's known right away. It records the run in
    `lastRuns` (the last three), advances `nextRunAt`, and arms the timer again.
 4. `delete` clears the state key and re-arms. Runs already dispatched keep running; only future occurrences
@@ -97,7 +100,7 @@ Notes:
 }
 ```
 
-`list` wraps the schedules with the project's timer:
+`list` wraps the schedules with the object's timer:
 
 ```json
 {
@@ -129,14 +132,32 @@ The cluster setup (`cluster-setup`) wires this up; the pieces, for reference:
   preflight mode, and has the generic invoke endpoint on (`[ingress] experimental-generic-invoke = true`).
 - The cron is **not** registered in Restate. It's registered in the schema registry as a **shared** deployment (no
   tenant), and Restate reaches it through the relay: `schema-registry/demo/cron.json` is the entry for the demo
-  cluster. Its targets (e.g. `checkout`) are registered there too, shared or per tenant (a tenant = a project id).
-- On every call the cron makes (the run, its own delayed `wake`), the relay looks the callee up in the registry and
-  tells Restate its type and retentions. The cron runs unscoped (platform code), so the relay keeps the scope it chose:
-  the project id for runs, none for `wake`.
+  cluster. Its targets (e.g. `checkout`) are registered there too, shared or per tenant (a tenant = a scope).
+- Each tenant's `cron/default` runs in the tenant's scope. On every call it makes (the run, its own delayed `wake`),
+  the relay looks the callee up in the registry in that scope and tells Restate its type and retentions. The relay
+  pins a scoped invocation's calls to its scope (a call to another scope fails the invocation), so the runs can only
+  land in the tenant's scope.
 
-Restate's regular `/cron/...` ingress paths answer `404` for a service it doesn't have registered. Until the ingress
-mux (which will translate them), the cron's handlers are called through the generic invoke endpoint, with a JSON
-envelope that carries the target type Restate can't look up:
+Restate's regular `/restate/…/cron/...` paths answer `404` for a service it doesn't have registered. Call the cron
+through the **ingress mux**, which looks its target types up in the registry and forces the tenant's scope:
+
+```sh
+MUX=http://<ingress-mux>:8080
+
+# as the tenant (the token's tenant is the scope)
+curl $MUX/restate/call/cron/default/list -H "authorization: Bearer $TENANT_TOKEN"
+
+# as the operator, in a tenant's scope
+curl $MUX/restate/scope/$TENANT/call/cron/default/create -H "authorization: Bearer $OPERATOR_TOKEN" --json '{
+  "cron": "*/5 * * * *",
+  "timezone": "Europe/Berlin",
+  "target": { "service": "checkout", "handler": "run" },
+  "payload": { "userId": "alice", "amount": 4200 }
+}'
+```
+
+Without the mux, call Restate's generic invoke endpoint directly, with a JSON envelope (`02-contract.md` §3 in the
+design docs) that carries the scope and the target type Restate can't look up:
 
 | Handler            | `targetType`               |
 | ------------------ | -------------------------- |
@@ -145,13 +166,13 @@ envelope that carries the target type Restate can't look up:
 
 ```sh
 RESTATE=http://localhost:8080
-PROJECT=$(uuidgen | tr 'A-Z' 'a-z')
+TENANT=$(uuidgen | tr 'A-Z' 'a-z')
 
 # cron <call|send> <handler> <targetType> [json input]
 # journalRetentionMillis 0: the bookkeeping handlers keep no journal (what the cron's code declares).
 cron() {
-  jq -n --arg handler "$2" --arg targetType "$3" --arg key "$PROJECT" --arg input "${4:-}" '{
-      service: "cron", handler: $handler, targetType: $targetType, key: $key,
+  jq -n --arg handler "$2" --arg targetType "$3" --arg scope "$TENANT" --arg input "${4:-}" '{
+      service: "cron", handler: $handler, targetType: $targetType, scope: $scope, key: "default",
       payload: ($input | @base64), journalRetentionMillis: 0 }' |
     curl -s "$RESTATE/restate/$1" -d @- \
       -H 'content-type: application/vnd.restate.generic-invocation.v1+json'
@@ -167,9 +188,6 @@ cron call list virtual_object_shared
 cron call get virtual_object_shared '{ "id": "<schedule id>" }'
 cron call delete virtual_object_exclusive '{ "id": "<schedule id>" }'
 ```
-
-The envelope (`02-contract.md` §3 in the design docs) has no `scope`: the cron itself runs unscoped and picks the
-project scope for its runs.
 
 ## Run it locally (plain Restate)
 
@@ -196,27 +214,28 @@ project scope for its runs.
    # if the server runs in Docker on macOS, use http://host.docker.internal:9080
    ```
 
-4. Manage schedules through the ingress. The path segment after `cron` is the project id:
+4. Manage schedules through the ingress, in the tenant's scope:
 
    ```sh
-   PROJECT=$(uuidgen | tr 'A-Z' 'a-z')
+   TENANT=$(uuidgen | tr 'A-Z' 'a-z')
+   CRON=localhost:8080/restate/scope/$TENANT/call/cron/default
 
-   curl localhost:8080/cron/$PROJECT/create --json '{
+   curl $CRON/create --json '{
      "cron": "*/5 * * * *",
      "timezone": "Europe/Berlin",
      "target": { "service": "MyService", "handler": "run" },
      "payload": { "report": "daily" }
    }'
 
-   curl localhost:8080/cron/$PROJECT/list
-   curl localhost:8080/cron/$PROJECT/get --json '{ "id": "<schedule id>" }'
-   curl localhost:8080/cron/$PROJECT/delete --json '{ "id": "<schedule id>" }'
+   curl $CRON/list -X POST
+   curl $CRON/get --json '{ "id": "<schedule id>" }'
+   curl $CRON/delete --json '{ "id": "<schedule id>" }'
    ```
 
    Pending and past runs are visible in Restate's introspection, including the scope:
 
    ```sql
-   SELECT id, target, status, scope FROM sys_invocation WHERE scope = '<project id>';
+   SELECT id, target, status, scope FROM sys_invocation WHERE scope = '<tenant>';
    ```
 
 ## Docker and CI
