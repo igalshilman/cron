@@ -73,10 +73,10 @@ Notes:
 - Occurrences missed while a wake-up was late collapse into one run, and the schedule jumps to the next future
   occurrence. The `x-scheduled-for` header carries the occurrence the run stands for.
 - A `wake` whose invocation id no longer matches the stored timer is a no-op.
-- Journal retention is zero for the bookkeeping handlers (`create`, `update`, `delete`, `get`, `list`) and ten minutes
-  for `wake` and `signal`, so recent wake-ups and signals stay inspectable in the UI without accumulating forever.
-  With the schemaless runtime these values come from the cron's schema registry entry and from the caller, not from
-  the code (see below).
+- No journal retention for any handler, and a 10-minute idempotency retention (object options): a completed
+  invocation of the cron leaves nothing behind but, for 10 minutes, the answer to a request retried with the same
+  idempotency key. At 1M tenants this keeps Restate from storing a day of wake-ups and creates. The cron is in
+  Restate's own registry (registered by discovery), so these values are the code's.
 - Each run is an idempotent invocation: its result is kept for the target's idempotency retention, which the relay
   takes from the target's schema registry entry (Restate's server default, `[invocation] default-idempotency-retention`,
   when the entry has none).

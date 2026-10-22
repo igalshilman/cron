@@ -30,7 +30,6 @@ export const cron = restate.object({
       {
         input: restate.serde.schema(CreateScheduleRequest),
         output: restate.serde.schema(Schedule),
-        journalRetention: 0, // bookkeeping: nothing to inspect after completion
       },
       async (ctx: Ctx, req) => {
         const id = ctx.rand.uuidv4();
@@ -60,7 +59,6 @@ export const cron = restate.object({
       {
         input: restate.serde.schema(UpdateScheduleRequest),
         output: restate.serde.schema(Schedule),
-        journalRetention: 0,
       },
       async (ctx: Ctx, req) => {
         const existing = await ctx.get(scheduleKey(req.id));
@@ -85,7 +83,7 @@ export const cron = restate.object({
     ),
 
     delete: restate.createObjectHandler(
-      { input: restate.serde.schema(ScheduleRef), journalRetention: 0 },
+      { input: restate.serde.schema(ScheduleRef) },
       async (ctx: Ctx, { id }) => {
         if (!(await ctx.get(scheduleKey(id)))) {
           throw notFound(id);
@@ -123,7 +121,6 @@ export const cron = restate.object({
       {
         input: restate.serde.schema(ScheduleRef),
         output: restate.serde.schema(Schedule),
-        journalRetention: 0,
       },
       async (ctx: SharedCtx, { id }) => {
         const schedule = await ctx.get(scheduleKey(id));
@@ -135,7 +132,7 @@ export const cron = restate.object({
     ),
 
     list: restate.createObjectSharedHandler(
-      { output: restate.serde.schema(Project), journalRetention: 0 },
+      { output: restate.serde.schema(Project) },
       async (ctx: SharedCtx) => ({
         timer: await ctx.get("timer"),
         schedules: await loadSchedules(ctx),
@@ -177,7 +174,10 @@ export const cron = restate.object({
     }),
   },
   options: {
-    journalRetention: { minutes: 10 },
+    // Nothing to inspect after an invocation completes; a retried request (same idempotency key) within 10 minutes
+    // gets the first answer back.
+    journalRetention: 0,
+    idempotencyRetention: { minutes: 10 },
   },
 });
 
