@@ -20,8 +20,8 @@ It also runs on a plain Restate for local development.
 
 - `src/cron-expression.ts` - all cron parsing and next-occurrence math, returning plain data (`CronSpec`, epoch
   millis). The only file that touches cron-parser.
-- `src/schemas.ts` - zod schemas for `Target`, `Run`, `Schedule` and the requests. Handler inputs and outputs are
-  validated with them through `restate.serde.schema`.
+- `src/schemas.ts` - zod schemas for `Target`, `Run`, `Schedule` and the requests and responses. Handler inputs and
+  outputs are validated with them through `restate.serde.schema`.
 - `src/cron.ts` - the `cron` Virtual Object.
 - `src/app.ts` - the HTTP endpoint serving it on port 9080.
 
@@ -31,14 +31,15 @@ Scope: the tenant. Key: `default` by convention (one object per tenant); the cod
 sends its runs and its own wake-ups in its scope (none for an unscoped object). A scope must match
 `[a-zA-Z0-9_.-]{1,36}`; a UUID does.
 
-| Handler  | Kind                       | Input                   | Output     |
-| -------- | -------------------------- | ----------------------- | ---------- |
-| `create` | exclusive                  | `CreateScheduleRequest` | `Schedule` |
-| `update` | exclusive                  | `UpdateScheduleRequest` | `Schedule` |
-| `delete` | exclusive                  | `{ id }`                | -          |
-| `get`    | shared                     | `{ id }`                | `Schedule` |
-| `list`   | shared                     | -                       | `Project`  |
-| `wake`   | exclusive, ingress-private | -                       | -          |
+| Handler  | Kind                       | Input                   | Output                    |
+| -------- | -------------------------- | ----------------------- | ------------------------- |
+| `create` | exclusive                  | `CreateScheduleRequest` | `Schedule`                |
+| `update` | exclusive                  | `UpdateScheduleRequest` | `Schedule`                |
+| `delete` | exclusive                  | `{ id }`                | -                         |
+| `signal` | exclusive                  | `SignalRequest`         | `{ runId, invocationId }` |
+| `get`    | shared                     | `{ id }`                | `Schedule`                |
+| `list`   | shared                     | -                       | `Project`                 |
+| `wake`   | exclusive, ingress-private | -                       | -                         |
 
 ### How a schedule runs
 
@@ -59,6 +60,7 @@ sends its runs and its own wake-ups in its scope (none for an unscoped object). 
    the timer is re-armed. Runs already dispatched aren't affected. An unknown id ⇒ `404`.
 5. `delete` clears the state key and re-arms. Runs already dispatched keep running; only future occurrences
    disappear.
+6. `signal` resolves a Restate signal on one of the schedule's runs, see [Signalling a run](#signalling-a-run).
 
 Notes:
 
@@ -71,14 +73,60 @@ Notes:
 - Occurrences missed while a wake-up was late collapse into one run, and the schedule jumps to the next future
   occurrence. The `x-scheduled-for` header carries the occurrence the run stands for.
 - A `wake` whose invocation id no longer matches the stored timer is a no-op.
-- Journal retention is zero for the bookkeeping handlers (`create`, `update`, `delete`, `get`, `list`) and ten minutes for
-  `wake`, so recent wake-ups stay inspectable in the UI without accumulating forever. With the schemaless runtime these
-  values come from the cron's schema registry entry and from the caller, not from the code (see below).
+- Journal retention is zero for the bookkeeping handlers (`create`, `update`, `delete`, `get`, `list`) and ten minutes
+  for `wake` and `signal`, so recent wake-ups and signals stay inspectable in the UI without accumulating forever.
+  With the schemaless runtime these values come from the cron's schema registry entry and from the caller, not from
+  the code (see below).
 - Each run is an idempotent invocation: its result is kept for the target's idempotency retention, which the relay
   takes from the target's schema registry entry (Restate's server default, `[invocation] default-idempotency-retention`,
   when the entry has none).
 - `target.address` is accepted and stored for older clients, but unused: the schema registry owns where a service
   runs. Runs no longer get an `x-target-address` header.
+
+### Signalling a run
+
+`signal` lets a caller deliver a Restate signal to a run the cron dispatched, naming the schedule instead of an
+invocation id (e.g. to approve a step a TanStack workflow is waiting on).
+
+Request (`SignalRequest`):
+
+```json
+{
+  "scheduleId": "2a8658e7-bff3-4903-87de-7fb87c3d3b76",
+  "runId": "e1afdf13-...",
+  "name": "approval:refund",
+  "payload": { "approved": true, "feedback": "ok" }
+}
+```
+
+- `scheduleId` (required): the schedule.
+- `runId` (optional): which run, one of the schedule's `lastRuns`. Left out: the latest run.
+- `name` (required): the raw Restate signal name. The cron stays generic and adds no prefix.
+- `payload` (optional, any JSON): the value the signal resolves with. Left out: JSON `null`.
+
+Response: the run that was signalled, `{ "runId": "e1afdf13-...", "invocationId": "inv_1ir2UWPz..." }`.
+
+Errors (terminal):
+
+- unknown `scheduleId` ⇒ `404`, like `update`, `delete` and `get`;
+- `runId` not in the schedule's `lastRuns` ⇒ `404`;
+- no `runId` and the schedule hasn't run yet ⇒ `404`;
+- a malformed request (missing or empty `scheduleId` / `name`, empty `runId`) ⇒ `400`, like the other handlers.
+
+Notes:
+
+- Only the runs in `lastRuns` can be signalled, i.e. the last three (`RUN_HISTORY`) of each schedule. An older run
+  answers `404` even if it's still waiting.
+- A run that already finished drops the signal (Restate's behaviour); `signal` still succeeds.
+- The cron only signals invocations it dispatched itself, in its own scope.
+
+For a target that is a **TanStack workflow** (`@restatedev/tanstack-workflows`), use the integration's internal
+signal names:
+
+| Workflow side         | `name`                  | `payload`                                      |
+| --------------------- | ----------------------- | ---------------------------------------------- |
+| `approve(approvalId)` | `approval:<approvalId>` | `{ "approved": boolean, "feedback"?: string }` |
+| `waitForEvent(name)`  | `event:<name>`          | the event's payload                            |
 
 ### Stored shape
 
@@ -164,10 +212,10 @@ curl $MUX/restate/scope/$TENANT/call/cron/default/create -H "authorization: Bear
 Without the mux, call Restate's generic invoke endpoint directly, with a JSON envelope (`02-contract.md` §3 in the
 design docs) that carries the scope and the target type Restate can't look up:
 
-| Handler                      | `targetType`               |
-| ---------------------------- | -------------------------- |
-| `create`, `update`, `delete` | `virtual_object_exclusive` |
-| `get`, `list`                | `virtual_object_shared`    |
+| Handler                                | `targetType`               |
+| -------------------------------------- | -------------------------- |
+| `create`, `update`, `delete`, `signal` | `virtual_object_exclusive` |
+| `get`, `list`                          | `virtual_object_shared`    |
 
 ```sh
 RESTATE=http://localhost:8080
@@ -199,6 +247,11 @@ cron call update virtual_object_exclusive '{
   "payload": { "userId": "alice", "amount": 4200 }
 }'
 cron call delete virtual_object_exclusive '{ "id": "<schedule id>" }'
+cron call signal virtual_object_exclusive '{
+  "scheduleId": "<schedule id>",
+  "name": "approval:<approval id>",
+  "payload": { "approved": true }
+}'
 ```
 
 ## Run it locally (plain Restate)
@@ -241,6 +294,7 @@ cron call delete virtual_object_exclusive '{ "id": "<schedule id>" }'
 
    curl $CRON/list -X POST
    curl $CRON/get --json '{ "id": "<schedule id>" }'
+   curl $CRON/signal --json '{ "scheduleId": "<schedule id>", "name": "event:<name>", "payload": {} }'
    curl $CRON/delete --json '{ "id": "<schedule id>" }'
    ```
 

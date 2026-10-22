@@ -9,6 +9,8 @@ import {
   SCHEDULED_FOR_HEADER,
   Schedule,
   ScheduleRef,
+  SignalRequest,
+  SignalResponse,
   type Timer,
   UpdateScheduleRequest,
 } from "./schemas.js";
@@ -90,6 +92,30 @@ export const cron = restate.object({
         }
         ctx.clear(scheduleKey(id));
         await armTimer(ctx, await ctx.date.now());
+      },
+    ),
+
+    /**
+     * Resolve a Restate signal on one of a schedule's runs: `runId` if given, else the latest one. Only the runs in
+     * `lastRuns` (the last RUN_HISTORY) can be signalled. A run that already finished drops the signal (Restate's
+     * behaviour); the call still succeeds.
+     */
+    signal: restate.createObjectHandler(
+      {
+        input: restate.serde.schema(SignalRequest),
+        output: restate.serde.schema(SignalResponse),
+      },
+      async (ctx: Ctx, req) => {
+        const schedule = await ctx.get(scheduleKey(req.scheduleId));
+        if (!schedule) {
+          throw notFound(req.scheduleId);
+        }
+        const run = pickRun(schedule, req.runId);
+        ctx
+          .invocation(restate.InvocationIdParser.fromString(run.invocationId))
+          .signal(req.name)
+          .resolve(req.payload ?? null);
+        return { runId: run.runId, invocationId: run.invocationId };
       },
     ),
 
@@ -230,6 +256,22 @@ function dueAfter(spec: CronSpec, afterMs: number): number {
     );
   }
   return at;
+}
+
+/** The run `runId` of a schedule, or its latest run when no id is given; a terminal 404 when there's no such run. */
+function pickRun(schedule: Schedule, runId?: string): Run {
+  // lastRuns is newest first.
+  const run =
+    runId === undefined ? schedule.lastRuns[0] : schedule.lastRuns.find((r) => r.runId === runId);
+  if (!run) {
+    throw new restate.TerminalError(
+      runId === undefined
+        ? `schedule "${schedule.id}" has no runs`
+        : `run "${runId}" not found in schedule "${schedule.id}" (only its last ${RUN_HISTORY} runs are kept)`,
+      { errorCode: 404 },
+    );
+  }
+  return run;
 }
 
 function notFound(id: string): restate.TerminalError {

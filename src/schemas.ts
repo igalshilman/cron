@@ -5,7 +5,7 @@ import { CronSpec, cronProblem, isValidTimezone } from "./cron-expression.js";
 export const SCHEDULE_ID_HEADER = "x-schedule-id";
 export const SCHEDULED_FOR_HEADER = "x-scheduled-for";
 
-/** How many past runs a schedule remembers. */
+/** How many past runs a schedule remembers, and so how many of its runs `signal` can reach. */
 export const RUN_HISTORY = 3;
 
 export const Target = z.object({
@@ -54,6 +54,22 @@ export type UpdateScheduleRequest = z.infer<typeof UpdateScheduleRequest>;
 
 export const ScheduleRef = z.object({ id: z.string().min(1) });
 export type ScheduleRef = z.infer<typeof ScheduleRef>;
+
+/**
+ * Resolve a Restate signal on one of a schedule's runs: `runId` if given, else its latest run. `name` is the raw
+ * Restate signal name; a missing payload resolves the signal with JSON `null`.
+ */
+export const SignalRequest = z.object({
+  scheduleId: z.string().min(1),
+  runId: z.string().min(1).optional(),
+  name: z.string().min(1),
+  payload: z.json().optional(),
+});
+export type SignalRequest = z.infer<typeof SignalRequest>;
+
+/** What `signal` returns: the run it signalled. */
+export const SignalResponse = Run.pick({ runId: true, invocationId: true });
+export type SignalResponse = z.infer<typeof SignalResponse>;
 
 export const Schedule = z.object({
   id: z.string(),
